@@ -17,7 +17,7 @@ DEFAULT_SETTINGS = {
     "min_mem": "1024M",
     "max_mem": "2048M",
     "server_dir": os.getcwd(),
-    "backup_dir": os.path.join(os.getcwd(), "backups")
+    "server_jar": ""
 }
 
 def load_settings():
@@ -36,7 +36,9 @@ def save_settings(settings):
 GARBAGE_PATTERNS = [
     re.compile(r"^\s*$"),
     re.compile(r".*DEBUG:.*", re.IGNORECASE),
-    re.compile(r".*FINE:.*", re.IGNORECASE)
+    re.compile(r".*FINE:.*", re.IGNORECASE),
+    re.compile(r".*java\.app\..*", re.IGNORECASE),
+    re.compile(r".*org\.openjdk\.nashorn.*", re.IGNORECASE)
 ]
 
 def should_filter(line):
@@ -160,51 +162,6 @@ class MinecraftServerManager:
         else:
             print(message)
 
-# ------------------ Backup Manager ------------------
-class BackupManager:
-    def __init__(self, settings):
-        self.settings = settings
-        self.server_dir = settings["server_dir"]
-        self.backup_dir = settings.get("backup_dir", os.path.join(self.server_dir, "backups"))
-        if not os.path.exists(self.backup_dir):
-            os.makedirs(self.backup_dir)
-
-    def create_backup(self):
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        backup_name = f"backup_{timestamp}.zip"
-        backup_path = os.path.join(self.backup_dir, backup_name)
-        try:
-            with zipfile.ZipFile(backup_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for folder in ["world", "world_nether", "world_the_end"]:
-                    folder_path = os.path.join(self.server_dir, folder)
-                    if os.path.exists(folder_path):
-                        for root, dirs, files in os.walk(folder_path):
-                            for file in files:
-                                full_path = os.path.join(root, file)
-                                rel_path = os.path.relpath(full_path, self.server_dir)
-                                zipf.write(full_path, rel_path)
-                for file in ["server.properties", "whitelist.json", "ops.json"]:
-                    file_path = os.path.join(self.server_dir, file)
-                    if os.path.exists(file_path):
-                        zipf.write(file_path, file)
-            return backup_name
-        except Exception as e:
-            return str(e)
-
-    def list_backups(self):
-        if os.path.exists(self.backup_dir):
-            return [f for f in os.listdir(self.backup_dir) if f.endswith(".zip")]
-        return []
-
-    def restore_backup(self, backup_name):
-        backup_path = os.path.join(self.backup_dir, backup_name)
-        try:
-            with zipfile.ZipFile(backup_path, "r") as zipf:
-                zipf.extractall(self.server_dir)
-            return True
-        except Exception as e:
-            return str(e)
-
 # ------------------ Jar Download Worker ------------------
 class JarDownloadWorker(QThread):
     progress_signal = pyqtSignal(str)
@@ -300,8 +257,7 @@ class ServerGUI(QMainWindow):
         self.resize(1200, 800)
         self.settings = load_settings()
         self.manager = None
-        self.backup_manager = BackupManager(self.settings)
-        self.current_jar = None
+        self.current_jar = ""
         self.init_ui()
         self.monitor_timer = QTimer()
         self.monitor_timer.timeout.connect(self.update_server_status)
@@ -338,7 +294,6 @@ class ServerGUI(QMainWindow):
         self.init_logs_tab()
         self.tabs.addTab(self.logs_tab, "Logs")
 
-    # -------------- Server Status ------------------
     def update_server_status(self):
         if self.manager is None:
             self.status_label.setText("Status: No jar selected")
@@ -353,9 +308,7 @@ class ServerGUI(QMainWindow):
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
 
-    # -------------- Logs Tab ------------------
     def init_logs_tab(self):
-        # Latest tab
         self.latest_log_edit = QTextEdit()
         self.latest_log_edit.setReadOnly(True)
         load_latest_btn = QPushButton("Load Latest Log")
@@ -366,52 +319,35 @@ class ServerGUI(QMainWindow):
         latest_layout.addWidget(self.latest_log_edit)
         latest_tab = QWidget()
         latest_tab.setLayout(latest_layout)
-        # Errors tab
         self.error_log_edit = QTextEdit()
         self.error_log_edit.setReadOnly(True)
         error_tab = QWidget()
         error_layout = QVBoxLayout()
         error_layout.addWidget(self.error_log_edit)
         error_tab.setLayout(error_layout)
-        # Warns tab
         self.warn_log_edit = QTextEdit()
         self.warn_log_edit.setReadOnly(True)
         warn_tab = QWidget()
         warn_layout = QVBoxLayout()
         warn_layout.addWidget(self.warn_log_edit)
         warn_tab.setLayout(warn_layout)
-        # Info tab
         self.info_log_edit = QTextEdit()
         self.info_log_edit.setReadOnly(True)
         info_tab = QWidget()
         info_layout = QVBoxLayout()
         info_layout.addWidget(self.info_log_edit)
         info_tab.setLayout(info_layout)
-        # Mods tab
         self.mods_log_edit = QTextEdit()
         self.mods_log_edit.setReadOnly(True)
         mods_tab = QWidget()
         mods_layout = QVBoxLayout()
         mods_layout.addWidget(self.mods_log_edit)
         mods_tab.setLayout(mods_layout)
-        # Crash tab
-        self.crash_log_edit = QTextEdit()
-        self.crash_log_edit.setReadOnly(True)
-        load_crash_btn = QPushButton("Load Crash Log")
-        load_crash_btn.setToolTip("Extract crash cause from latest.log")
-        load_crash_btn.clicked.connect(self.load_crash_log)
-        crash_layout = QVBoxLayout()
-        crash_layout.addWidget(load_crash_btn)
-        crash_layout.addWidget(self.crash_log_edit)
-        crash_tab = QWidget()
-        crash_tab.setLayout(crash_layout)
-        # Add tabs to logs_tab
         self.logs_tab.addTab(latest_tab, "Latest")
         self.logs_tab.addTab(error_tab, "Errors")
         self.logs_tab.addTab(warn_tab, "Warns")
         self.logs_tab.addTab(info_tab, "Info")
         self.logs_tab.addTab(mods_tab, "Mods")
-        self.logs_tab.addTab(crash_tab, "Crash")
 
     def load_latest_log(self):
         log_path = os.path.join(self.settings["server_dir"], "logs", "latest.log")
@@ -422,44 +358,8 @@ class ServerGUI(QMainWindow):
         else:
             self.latest_log_edit.setPlainText("latest.log not found.")
 
-    def load_crash_log(self):
-        log_path = os.path.join(self.settings["server_dir"], "logs", "latest.log")
-        if not os.path.exists(log_path):
-            self.crash_log_edit.setPlainText("Crash log not found.")
-            return
-        with open(log_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        crash_section = []
-        in_crash = False
-        for line in lines:
-            if "-- Head --" in line:
-                in_crash = True
-            if in_crash:
-                if "Stacktrace:" in line:
-                    break
-                crash_section.append(line.strip())
-        if crash_section:
-            self.crash_log_edit.setPlainText("\n".join(crash_section))
-        else:
-            self.crash_log_edit.setPlainText("No crash information found.")
-
-    # -------------- Server Control Tab ------------------
     def init_control_tab(self):
         layout = QVBoxLayout()
-        top_layout = QHBoxLayout()
-        self.java_label = QLabel(f"Java: {self.settings['java_path']}")
-        btn_java = QPushButton("Select Java")
-        btn_java.setToolTip("Choose the Java executable")
-        btn_java.clicked.connect(self.select_java)
-        self.jar_label = QLabel("Selected Jar: None")
-        btn_jar = QPushButton("Select Jar")
-        btn_jar.setToolTip("Select the server jar file")
-        btn_jar.clicked.connect(self.select_jar)
-        top_layout.addWidget(self.java_label)
-        top_layout.addWidget(btn_java)
-        top_layout.addWidget(self.jar_label)
-        top_layout.addWidget(btn_jar)
-        layout.addLayout(top_layout)
         btn_layout = QHBoxLayout()
         self.start_btn = QPushButton("Start Server")
         self.start_btn.setToolTip("Start the Minecraft server")
@@ -487,29 +387,26 @@ class ServerGUI(QMainWindow):
         layout.addLayout(cmd_layout)
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
+        self.log_output.setLineWrapMode(QTextEdit.NoWrap)
         layout.addWidget(self.log_output)
         self.control_tab.setLayout(layout)
 
-    # -------------- Administration Tab ------------------
+    def append_log(self, text):
+        self.log_output.append(text)
+        for line in text.splitlines():
+            plain = re.sub(r'<\/?[^>]+>', '', line)
+            lower = plain.lower()
+            if "error" in lower:
+                self.error_log_edit.append(plain)
+            elif "warn" in lower:
+                self.warn_log_edit.append(plain)
+            elif "info" in lower:
+                self.info_log_edit.append(plain)
+            elif plain.startswith("re "):
+                self.mods_log_edit.append(plain)
+
     def init_admin_tab(self):
         layout = QVBoxLayout()
-        backup_group = QGroupBox("Backups")
-        backup_layout = QHBoxLayout()
-        self.backup_list = QListWidget()
-        self.refresh_backup_list()
-        btn_create = QPushButton("Create Backup")
-        btn_create.setToolTip("Create a backup of the server")
-        btn_create.clicked.connect(self.create_backup)
-        btn_restore = QPushButton("Restore Backup")
-        btn_restore.setToolTip("Restore a backup")
-        btn_restore.clicked.connect(self.restore_backup)
-        backup_layout.addWidget(self.backup_list)
-        btn_layout = QVBoxLayout()
-        btn_layout.addWidget(btn_create)
-        btn_layout.addWidget(btn_restore)
-        backup_layout.addLayout(btn_layout)
-        backup_group.setLayout(backup_layout)
-        layout.addWidget(backup_group)
         prop_group = QGroupBox("Server Properties")
         prop_layout = QVBoxLayout()
         self.prop_table = QTableWidget()
@@ -521,7 +418,7 @@ class ServerGUI(QMainWindow):
         btn_load_props.clicked.connect(self.load_properties)
         btn_save_props = QPushButton("Save Properties")
         btn_save_props.setToolTip("Save changes to server.properties")
-        btn_save_props.clicked.connect(self.save_properties)
+        btn_save_props.clicked.connect(self.save_settings_method)
         prop_btn_layout = QHBoxLayout()
         prop_btn_layout.addWidget(btn_load_props)
         prop_btn_layout.addWidget(btn_save_props)
@@ -531,7 +428,38 @@ class ServerGUI(QMainWindow):
         layout.addWidget(prop_group)
         self.admin_tab.setLayout(layout)
 
-    # -------------- Creative Tools Tab ------------------
+    def load_properties(self):
+        prop_path = os.path.join(self.settings["server_dir"], "server.properties")
+        if os.path.exists(prop_path):
+            self.prop_table.clearContents()
+            with open(prop_path, "r") as f:
+                lines = f.readlines()
+            kv_lines = [line.strip() for line in lines if "=" in line and not line.strip().startswith("#")]
+            self.prop_table.setRowCount(len(kv_lines))
+            for i, line in enumerate(kv_lines):
+                key, value = line.split("=", 1)
+                key_item = QTableWidgetItem(key)
+                value_item = QTableWidgetItem(value)
+                self.prop_table.setItem(i, 0, key_item)
+                self.prop_table.setItem(i, 1, value_item)
+        else:
+            QMessageBox.warning(self, "File Not Found", "server.properties not found.")
+
+    def save_properties(self):
+        prop_path = os.path.join(self.settings["server_dir"], "server.properties")
+        try:
+            rows = self.prop_table.rowCount()
+            lines = []
+            for i in range(rows):
+                key = self.prop_table.item(i, 0).text() if self.prop_table.item(i, 0) else ""
+                value = self.prop_table.item(i, 1).text() if self.prop_table.item(i, 1) else ""
+                lines.append(f"{key}={value}")
+            with open(prop_path, "w") as f:
+                f.write("\n".join(lines))
+            QMessageBox.information(self, "Saved", "server.properties saved successfully.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", str(e))
+
     def init_creative_tab(self):
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Creative tools and utilities:"))
@@ -544,7 +472,6 @@ class ServerGUI(QMainWindow):
         layout.addWidget(btn_send)
         self.creative_tab.setLayout(layout)
 
-    # -------------- Plugin Directory Tab ------------------
     def init_plugin_tab(self):
         layout = QVBoxLayout()
         self.plugin_tabs_inner = QTabWidget()
@@ -574,7 +501,6 @@ class ServerGUI(QMainWindow):
         layout.addWidget(self.plugin_tabs_inner)
         self.plugin_tab.setLayout(layout)
 
-    # -------------- Jar Downloader Tab ------------------
     def init_downloader_tab(self):
         layout = QVBoxLayout()
         dl_group = QGroupBox("Minecraft Server Jar Downloader")
@@ -628,7 +554,7 @@ class ServerGUI(QMainWindow):
                         item = QListWidgetItem(f"Forge {ver}")
                         item.setData(1000, url)
                         self.jar_list.addItem(item)
-                self.download_status.append("Fetched Forge versions.")
+                self.download_status.append(f"Fetched Forge versions.")
             except Exception as e:
                 self.download_status.append(f"Error fetching Forge versions: {e}")
         elif server_type == "Mohist":
@@ -697,7 +623,6 @@ class ServerGUI(QMainWindow):
         else:
             self.download_status.append("No jar selected.")
 
-    # -------------- Settings Tab ------------------
     def init_settings_tab(self):
         layout = QVBoxLayout()
         grid = QGridLayout()
@@ -725,17 +650,17 @@ class ServerGUI(QMainWindow):
         btn_browse_dir.setToolTip("Select server directory")
         btn_browse_dir.clicked.connect(self.select_server_dir)
         grid.addWidget(btn_browse_dir, 3, 2)
-        grid.addWidget(QLabel("Backup Directory:"), 4, 0)
-        self.backup_dir_input = QLineEdit(self.settings.get("backup_dir", ""))
-        self.backup_dir_input.editingFinished.connect(self.auto_save_settings)
-        grid.addWidget(self.backup_dir_input, 4, 1)
-        btn_browse_backup = QPushButton("Browse")
-        btn_browse_backup.setToolTip("Select backup directory")
-        btn_browse_backup.clicked.connect(self.select_backup_dir)
-        grid.addWidget(btn_browse_backup, 4, 2)
+        grid.addWidget(QLabel("Server Jar:"), 4, 0)
+        self.server_jar_input = QLineEdit(self.settings.get("server_jar", ""))
+        self.server_jar_input.editingFinished.connect(self.auto_save_settings)
+        grid.addWidget(self.server_jar_input, 4, 1)
+        btn_select_jar = QPushButton("Select Jar")
+        btn_select_jar.setToolTip("Select the server jar file")
+        btn_select_jar.clicked.connect(self.select_jar)
+        grid.addWidget(btn_select_jar, 4, 2)
         btn_save = QPushButton("Save Settings")
         btn_save.setToolTip("Save settings")
-        btn_save.clicked.connect(self.save_settings)
+        btn_save.clicked.connect(self.save_settings_method)
         grid.addWidget(btn_save, 5, 0, 1, 3)
         layout.addLayout(grid)
         self.settings_tab.setLayout(layout)
@@ -745,14 +670,22 @@ class ServerGUI(QMainWindow):
         self.settings["min_mem"] = self.min_mem_input.text().strip()
         self.settings["max_mem"] = self.max_mem_input.text().strip()
         self.settings["server_dir"] = self.server_dir_input.text().strip()
-        self.settings["backup_dir"] = self.backup_dir_input.text().strip()
+        self.settings["server_jar"] = self.server_jar_input.text().strip()
         save_settings(self.settings)
-        self.java_label.setText(f"Java: {os.path.basename(self.settings['java_path'])}")
         if hasattr(self, 'file_model'):
             self.file_model.setRootPath(self.settings["server_dir"])
             self.refresh_file_explorer()
 
-    # -------------- Java Manager Tab ------------------
+    def select_server_dir(self):
+        directory = QFileDialog.getExistingDirectory(self, "Select Server Directory", self.settings["server_dir"])
+        if directory:
+            self.settings["server_dir"] = directory
+            self.server_dir_input.setText(directory)
+            if hasattr(self, 'file_model'):
+                self.file_model.setRootPath(directory)
+                self.refresh_file_explorer()
+            self.auto_save_settings()
+
     def init_java_tab(self):
         layout = QVBoxLayout()
         detect_group = QGroupBox("Installed Java")
@@ -802,7 +735,6 @@ class ServerGUI(QMainWindow):
         self.java_progress.close()
         self.java_version_output.setPlainText(error)
 
-    # -------------- File Explorer Tab ------------------
     def init_file_explorer_tab(self):
         layout = QVBoxLayout()
         self.file_model = QFileSystemModel()
@@ -820,12 +752,10 @@ class ServerGUI(QMainWindow):
     def refresh_file_explorer(self):
         self.file_view.setRootIndex(self.file_model.index(self.settings["server_dir"]))
 
-    # -------------- Functions for Control Tab ------------------
     def select_java(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select Java Executable", "", "Executables (*.exe);;All Files (*)")
         if path:
             self.settings["java_path"] = path
-            self.java_label.setText(f"Java: {os.path.basename(path)}")
             self.java_path_input.setText(path)
             self.auto_save_settings()
 
@@ -833,10 +763,10 @@ class ServerGUI(QMainWindow):
         jar_path, _ = QFileDialog.getOpenFileName(self, "Select Server Jar", self.settings["server_dir"], "Jar Files (*.jar)")
         if jar_path:
             self.current_jar = os.path.basename(jar_path)
-            self.jar_label.setText(f"Selected Jar: {self.current_jar}")
-            self.settings["server_dir"] = os.path.dirname(jar_path)
-            self.server_dir_input.setText(self.settings["server_dir"])
-            self.manager = MinecraftServerManager(self.settings, self.current_jar)
+            self.server_jar_input.setText(self.current_jar)
+            self.settings["server_jar"] = jar_path
+            self.auto_save_settings()
+            self.manager = MinecraftServerManager(self.settings, jar_path)
             self.manager.set_output_callback(self.append_log)
             if hasattr(self, 'file_model'):
                 self.file_model.setRootPath(self.settings["server_dir"])
@@ -881,105 +811,12 @@ class ServerGUI(QMainWindow):
         else:
             self.append_log("Server not running or empty command.")
 
-    def append_log(self, text):
-        self.log_output.moveCursor(QTextCursor.End)
-        self.log_output.insertHtml(text + "<br>")
-        self.log_output.moveCursor(QTextCursor.End)
-        for line in text.split("<br>"):
-            plain = line.replace("<font color=\"red\">", "").replace("<font color=\"orange\">", "").replace("<font color=\"green\">", "").replace("</font>", "")
-            lower = plain.lower()
-            if "error" in lower:
-                self.error_log_edit.append(plain)
-            elif "warn" in lower:
-                self.warn_log_edit.append(plain)
-            elif "info" in lower:
-                self.info_log_edit.append(plain)
-            elif plain.startswith("re "):
-                self.mods_log_edit.append(plain)
-
-    # -------------- Functions for Administration Tab ------------------
-    def refresh_backup_list(self):
-        self.backup_list.clear()
-        backups = self.backup_manager.list_backups()
-        self.backup_list.addItems(backups)
-
-    def create_backup(self):
-        result = self.backup_manager.create_backup()
-        if result.endswith(".zip"):
-            QMessageBox.information(self, "Backup Created", f"Backup created: {result}")
-        else:
-            QMessageBox.warning(self, "Backup Error", str(result))
-        self.refresh_backup_list()
-
-    def restore_backup(self):
-        selected = self.backup_list.currentItem()
-        if selected:
-            backup_name = selected.text()
-            result = self.backup_manager.restore_backup(backup_name)
-            if result is True:
-                QMessageBox.information(self, "Backup Restored", f"Restored backup: {backup_name}")
-            else:
-                QMessageBox.warning(self, "Restore Error", str(result))
-        else:
-            QMessageBox.warning(self, "No Selection", "Please select a backup to restore.")
-
-    def load_properties(self):
-        prop_path = os.path.join(self.settings["server_dir"], "server.properties")
-        if os.path.exists(prop_path):
-            self.prop_table.clearContents()
-            with open(prop_path, "r") as f:
-                lines = f.readlines()
-            kv_lines = [line.strip() for line in lines if "=" in line and not line.strip().startswith("#")]
-            self.prop_table.setRowCount(len(kv_lines))
-            for i, line in enumerate(kv_lines):
-                key, value = line.split("=", 1)
-                key_item = QTableWidgetItem(key)
-                value_item = QTableWidgetItem(value)
-                self.prop_table.setItem(i, 0, key_item)
-                self.prop_table.setItem(i, 1, value_item)
-        else:
-            QMessageBox.warning(self, "File Not Found", "server.properties not found.")
-
-    def save_properties(self):
-        prop_path = os.path.join(self.settings["server_dir"], "server.properties")
-        try:
-            rows = self.prop_table.rowCount()
-            lines = []
-            for i in range(rows):
-                key = self.prop_table.item(i, 0).text() if self.prop_table.item(i, 0) else ""
-                value = self.prop_table.item(i, 1).text() if self.prop_table.item(i, 1) else ""
-                lines.append(f"{key}={value}")
-            with open(prop_path, "w") as f:
-                f.write("\n".join(lines))
-            QMessageBox.information(self, "Saved", "server.properties saved successfully.")
-        except Exception as e:
-            QMessageBox.warning(self, "Error", str(e))
-
-    # -------------- Functions for Downloader Tab ------------------
     def browse_download_dir(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Download Directory", self.settings["server_dir"])
         if directory:
             self.download_dir_input.setText(directory)
 
-    # -------------- Functions for Settings Tab ------------------
-    def select_server_dir(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Server Directory", self.settings["server_dir"])
-        if directory:
-            self.settings["server_dir"] = directory
-            self.server_dir_input.setText(directory)
-            if hasattr(self, 'file_model'):
-                self.file_model.setRootPath(directory)
-                self.refresh_file_explorer()
-            self.auto_save_settings()
-
-    def select_backup_dir(self):
-        directory = QFileDialog.getExistingDirectory(self, "Select Backup Directory", self.settings.get("backup_dir", ""))
-        if directory:
-            self.settings["backup_dir"] = directory
-            self.backup_dir_input.setText(directory)
-            self.auto_save_settings()
-
-    def save_settings(self):
+    def save_settings_method(self):
         self.auto_save_settings()
         QMessageBox.information(self, "Settings Saved", "Settings have been saved.")
 
